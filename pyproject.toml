@@ -1,0 +1,27 @@
+[project]
+name = "update-kit"
+dynamic = ["version"]
+description = "Self-update for git-tag-released Python CLIs (uv tool / pipx). Stdlib only."
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "MIT" }
+dependencies = []
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.version]
+path = "src/update_kit/__init__.py"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/update_kit"]
+
+[dependency-groups]
+dev = [
+    "pytest>=8",
+    "ruff>=0.15.21",
+]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
