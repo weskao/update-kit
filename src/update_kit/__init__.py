@@ -41,7 +41,11 @@ __all__ = [
 
 _IS_WINDOWS = os.name == "nt"  # the running exe is locked there; tests patch this flag
 
-_STRICT = re.compile(r"v?([0-9]+)\.([0-9]+)\.([0-9]+)")
+_STRICT = re.compile(r"v?([0-9]{1,9})\.([0-9]{1,9})\.([0-9]{1,9})")
+_CONTROL = re.compile(r"[\x00-\x1f\x7f-\x9f]")
+_USERINFO = re.compile(r"(?<=://)[^/\s]*@")
+# Only these remote forms reach git; no whitespace/control chars, no userinfo (credentials).
+_URL_OK = re.compile(r"(?:https://(?![^/?#]*@)|ssh://(?![^/?#]*:[^/?#]*@)|file://)[^\s\x00-\x1f\x7f-\x9f]+|git@[A-Za-z0-9][A-Za-z0-9._-]*:[^\s\x00-\x1f\x7f-\x9f]+")
 # cmd.exe would interpret these inside the detached chain; such updates are refused.
 _CMD_META = re.compile(r'[&|<>^%"()!\r\n]')
 
@@ -57,6 +61,7 @@ _MESSAGES = {
         "after_failed": "warning: `{step}` failed after the update ({error})",
         "background": "{app} {latest}: update continues in the background (log: {log})",
         "hint": "{cmd} {latest} is available (you have {current}) — run `{cmd} update`",
+        "source": "{app}: using update source {url} (UPDATE_KIT_REPO_URL)",
     },
     "zh-TW": {
         "dev": "{app}：開發版安裝（{dir}），請用 git pull 更新",
@@ -69,6 +74,7 @@ _MESSAGES = {
         "after_failed": "警告：更新後執行 `{step}` 失敗（{error}）",
         "background": "{app} {latest}：更新將在背景繼續（記錄檔：{log}）",
         "hint": "{cmd} {latest} 可更新（目前為 {current}）— 執行 `{cmd} update`",
+        "source": "{app}：使用更新來源 {url}（UPDATE_KIT_REPO_URL）",
     },
 }
 
@@ -82,8 +88,16 @@ def _parse(version: str | None) -> tuple[int, int, int] | None:
     return tuple(int(part) for part in match.groups()) if match else None
 
 
+def _clean(text: str) -> str:
+    """Printable, credential-free *text* (terminal escapes and URL userinfo removed)."""
+    return _USERINFO.sub("", _CONTROL.sub("", text))
+
+
 def _repo_url(repo: str, url: str | None) -> str:
-    return url or os.environ.get("UPDATE_KIT_REPO_URL") or f"https://github.com/{repo}.git"
+    target = url or os.environ.get("UPDATE_KIT_REPO_URL") or f"https://github.com/{repo}.git"
+    if not _URL_OK.fullmatch(target):
+        raise UpdateError(f"unsupported repo URL: {_clean(target)[:200]!r}")
+    return target
 
 
 def _msg(lang: str, key: str, **fields) -> str:
@@ -100,6 +114,7 @@ def _say(out: TextIO, text: str) -> None:
 
 def latest_tag(repo: str, *, timeout: float = 5, url: str | None = None) -> str:
     """Newest strict ``vX.Y.Z`` tag of github.com/<repo>; raises UpdateError."""
+    # Validated before any git call: a value like "--upload-pack=..." must never reach argv.
     target = _repo_url(repo, url)
     # No credential/passphrase prompt for a private/missing repo: fail instead of blocking.
     # Low-speed limits stop a stalled HTTP transfer that outlives the killed git process.
@@ -113,9 +128,10 @@ def latest_tag(repo: str, *, timeout: float = 5, url: str | None = None) -> str:
     }
     try:
         result = subprocess.run(
-            ["git", "ls-remote", "--tags", "--refs", target],
+            ["git", "-c", "protocol.ext.allow=never", "ls-remote", "--tags", "--refs", "--", target],
             capture_output=True, text=True, encoding="utf-8", errors="replace",
             stdin=subprocess.DEVNULL, timeout=timeout, env=env, check=False,
+            cwd=Path.home(),  # a repo-local config/hook in the caller's cwd must not apply
         )
     except FileNotFoundError as exc:
         raise UpdateError("git not found") from exc
@@ -125,11 +141,11 @@ def latest_tag(repo: str, *, timeout: float = 5, url: str | None = None) -> str:
         raise UpdateError(str(exc)) from exc
     if result.returncode != 0:
         detail = (result.stderr or "").strip().splitlines()
-        raise UpdateError(detail[-1] if detail else f"git ls-remote exited {result.returncode}")
-    tags = [line.rpartition("refs/tags/")[2] for line in result.stdout.splitlines() if "refs/tags/" in line]
-    versions = [(parsed, tag) for tag in tags if (parsed := _parse(tag))]
+        raise UpdateError(_clean(detail[-1]) if detail else f"git ls-remote exited {result.returncode}")
+    tags = [line.split("\trefs/tags/", 1)[1] for line in result.stdout.splitlines() if "\trefs/tags/" in line]
+    versions = [(tuple(map(int, m.groups())), tag) for tag in tags if (m := _STRICT.fullmatch(tag))]
     if not versions:
-        raise UpdateError(f"no release tags in {target}")
+        raise UpdateError(f"no release tags in {_clean(target)}")
     return max(versions)[1]
 
 
@@ -173,8 +189,9 @@ def _spawn_detached(cmdline: str, log: str) -> None:  # pragma: no cover - Windo
     os.makedirs(os.path.dirname(log), exist_ok=True)
     # CREATE_NO_WINDOW (not DETACHED_PROCESS): children inherit a hidden console, no flashing.
     flags = subprocess.CREATE_NO_WINDOW | subprocess.CREATE_NEW_PROCESS_GROUP
+    # cwd=home: cmd.exe searches the cwd first, so a planted uv.bat/crw.exe there must not run.
     subprocess.Popen(cmdline, creationflags=flags, close_fds=True, stdin=subprocess.DEVNULL,
-                     stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                     stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, cwd=str(Path.home()))
 
 
 def update(*, app: str, repo: str, dist: str, current: str | None = None, lang: str = "en",
@@ -191,7 +208,10 @@ def update(*, app: str, repo: str, dist: str, current: str | None = None, lang: 
         except metadata.PackageNotFoundError:
             pass
     try:
-        latest = latest_tag(repo, url=url)
+        target = _repo_url(repo, url)
+        if not url and os.environ.get("UPDATE_KIT_REPO_URL"):
+            _say(out, _msg(lang, "source", app=app, url=_clean(target)))
+        latest = latest_tag(repo, url=target)
     except UpdateError as exc:
         _say(out, _msg(lang, "check_failed", app=app, error=exc))
         return 1
@@ -200,7 +220,9 @@ def update(*, app: str, repo: str, dist: str, current: str | None = None, lang: 
         _say(out, _msg(lang, "up_to_date", app=app, current=current))
         return 0
     # An unparseable/unknown current version is treated as older: the user asked to update.
-    spec = f"git+{_repo_url(repo, url)}@{latest}"
+    # pip/uv can't parse the scp form (git@host:path); install over the equivalent ssh:// URL.
+    source = re.sub(r"^git@([^:]+):/?", r"ssh://git@\1/", target)
+    spec = f"git+{source}@{latest}"
     shown = current or "?"
     if kind == "uv":
         install = ["uv", "tool", "install", "--force", "--no-sources", spec]
@@ -226,7 +248,7 @@ def update(*, app: str, repo: str, dist: str, current: str | None = None, lang: 
         return 0
     _say(out, _msg(lang, "installing", app=app, current=shown, latest=latest))
     try:
-        code = run(install).returncode
+        code = run(install, cwd=Path.home()).returncode
     except OSError as exc:
         _say(out, _msg(lang, "install_failed", app=app, error=exc))
         return 1
@@ -249,7 +271,7 @@ def update(*, app: str, repo: str, dist: str, current: str | None = None, lang: 
 
 def check(*, repo: str, current: str, cache_path: Path | None = None, ttl: int = 86400,
           timeout: float = 1.5, url: str | None = None) -> str | None:
-    """Newer release tag than *current*, or None. Cached per repo for *ttl*; never raises."""
+    """Newer release tag than *current*, or None. Cached per source URL for *ttl*; never raises."""
     try:
         path = Path(cache_path) if cache_path else Path.home() / ".update-kit" / "state.json"
         try:
@@ -258,11 +280,14 @@ def check(*, repo: str, current: str, cache_path: Path | None = None, ttl: int =
             state = {}
         if not isinstance(state, dict):
             state = {}
-        entry = state.get(repo)
+        key = _repo_url(repo, url)  # keyed by source, so an override can't poison the normal entry
+        entry = state.get(key)
         now = time.time()
         checked = entry.get("checked") if isinstance(entry, dict) else None
         cached = entry.get("latest") if isinstance(entry, dict) else None
-        valid = isinstance(checked, (int, float)) and (cached is None or isinstance(cached, str))
+        valid = isinstance(checked, (int, float)) and (
+            cached is None or (isinstance(cached, str) and _STRICT.fullmatch(cached) is not None)
+        )
         if valid and 0 <= now - checked < ttl:
             latest = cached
         else:
@@ -272,7 +297,7 @@ def check(*, repo: str, current: str, cache_path: Path | None = None, ttl: int =
                 latest = None
             # shortcut: read-merge-replace without a lock; a concurrent writer can drop one
             # entry, which only costs one extra ls-remote later. Add a lock if that matters.
-            state[repo] = {"checked": now, "latest": latest}
+            state[key] = {"checked": now, "latest": latest}
             tmp = path.with_name(f"{path.name}.{os.getpid()}.tmp")
             try:
                 path.parent.mkdir(parents=True, exist_ok=True)

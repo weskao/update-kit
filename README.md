@@ -52,7 +52,7 @@ def main(argv=None):
 | `latest_tag(repo, *, timeout=5, url=None) -> str` | Newest strict `v?X.Y.Z` tag (ASCII digits) via `git ls-remote --tags --refs`. Prereleases and other names are ignored. Raises `UpdateError` (offline, no tags, git missing). |
 | `install_kind(dist) -> (kind, detail)` | `"dev"` (PEP 610 local/editable dir, detail = the dir), `"uv"` / `"pipx"` (from `sys.prefix`), else `"unknown"`. |
 | `update(*, app, repo, dist, current=None, lang="en", after=(), out=sys.stderr, run=subprocess.run, url=None) -> int` | Exit code: **0** updated or already up to date · **1** couldn't check (offline/rate limit) or install/after-step failed · **2** dev install (use `git pull`) or unknown install (manual command printed). |
-| `check(*, repo, current, cache_path=None, ttl=86400, timeout=1.5, url=None) -> str \| None` | Newer tag or `None`. Never raises. Results — failures too — are cached for `ttl` in `$HOME/.update-kit/state.json`, keyed by repo. |
+| `check(*, repo, current, cache_path=None, ttl=86400, timeout=1.5, url=None) -> str \| None` | Newer tag or `None`. Never raises. Results — failures too — are cached for `ttl` in `$HOME/.update-kit/state.json`, keyed by the resolved source URL. |
 | `hint(cmd, latest, current, lang="en") -> str` | `my-cli v1.2.0 is available (you have 1.1.0) — run` `` `my-cli update` `` |
 | `should_hint(stream=sys.stderr) -> bool` | `True` only when `stream` is a TTY. |
 | `normalize_lang(value) -> str` | `zh_TW` / `zh-tw` / `zh-Hant` / `zh_HK` → `"zh-TW"`; anything else → `"en"`. |
@@ -63,7 +63,12 @@ Install commands used by `update`:
 - pipx: `pipx install --force git+<url>@<tag>`
 
 `<url>` is `url=`, else `$UPDATE_KIT_REPO_URL`, else `https://github.com/<repo>.git`
-(`file://` works, which is how the tests run without a network).
+(`file://` works, which is how the tests run without a network). Only `https://`, `ssh://`,
+`file://` and `git@host:path` are accepted (`ssh://git@host/...` is fine, `ssh://user:pass@` is not; `git@host:path` is installed as `ssh://git@host/path`); a leading `-`, whitespace/control characters,
+`ext::` or credentials in the URL (`user:pass@`) raise `UpdateError` (`update` returns 1,
+`check` returns `None`). When `$UPDATE_KIT_REPO_URL` is in effect, `update` prints one line
+naming it. `git ls-remote` runs as `git -c protocol.ext.allow=never ls-remote --tags --refs -- <url>`
+from the home directory, and so does the install; git's stderr is stripped of control characters.
 
 **Windows:** the running `.exe` is locked, so `update` starts the install (and the `after`
 steps, chained with `&&`) in a detached `cmd.exe` that waits a few seconds for the app to

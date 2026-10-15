@@ -9,6 +9,7 @@ import pytest
 import update_kit as uk
 
 ROOT = Path(__file__).resolve().parents[1]
+DEMO_URL = "https://github.com/owner/demo.git"
 
 
 # --------------------------------------------------------------------------- helpers
@@ -19,12 +20,14 @@ class FakeRun:
 
     def __init__(self, codes=None, raise_on=None):
         self.calls = []
+        self.kwargs = []
         self.codes = codes or {}
         self.raise_on = raise_on
 
     def __call__(self, argv, *args, **kwargs):
         argv = list(argv)
         self.calls.append(argv)
+        self.kwargs.append(kwargs)
         if self.raise_on and argv[0] == self.raise_on:
             raise FileNotFoundError(argv[0])
         return subprocess.CompletedProcess(argv, self.codes.get(argv[0], 0))
@@ -134,7 +137,10 @@ def test_latest_tag_default_url_is_github(monkeypatch):
     monkeypatch.delenv("UPDATE_KIT_REPO_URL", raising=False)
     monkeypatch.setattr(uk.subprocess, "run", fake)
     assert uk.latest_tag("owner/demo") == "v1.0.0"
-    assert seen["argv"] == ["git", "ls-remote", "--tags", "--refs", "https://github.com/owner/demo.git"]
+    assert seen["argv"] == [
+        "git", "-c", "protocol.ext.allow=never", "ls-remote", "--tags", "--refs", "--",
+        "https://github.com/owner/demo.git",
+    ]
 
 
 # --------------------------------------------------------------------------- install_kind
@@ -343,7 +349,7 @@ def test_check_returns_newer_and_caches(tmp_path, tags):
     assert uk.check(repo="owner/demo", current="1.0.0", cache_path=cache) == "v1.1.0"
     assert uk.check(repo="owner/demo", current="1.0.0", cache_path=cache) == "v1.1.0"
     assert tags["calls"] == 1
-    entry = json.loads(cache.read_text(encoding="utf-8"))["owner/demo"]
+    entry = json.loads(cache.read_text(encoding="utf-8"))[DEMO_URL]
     assert entry["latest"] == "v1.1.0"
 
 
@@ -353,7 +359,7 @@ def test_check_not_newer_returns_none(tmp_path, tags):
 
 def test_check_refetches_after_ttl(tmp_path, tags):
     cache = tmp_path / "state.json"
-    cache.write_text(json.dumps({"owner/demo": {"checked": time.time() - 100, "latest": "v1.0.5"}}),
+    cache.write_text(json.dumps({DEMO_URL: {"checked": time.time() - 100, "latest": "v1.0.5"}}),
                      encoding="utf-8")
     assert uk.check(repo="owner/demo", current="1.0.0", cache_path=cache, ttl=50) == "v1.1.0"
     assert tags["calls"] == 1
@@ -386,7 +392,7 @@ def test_check_keeps_other_repos(tmp_path, tags):
     cache = tmp_path / "state.json"
     cache.write_text(json.dumps({"other/repo": {"checked": 1, "latest": "v0.1.0"}}), encoding="utf-8")
     uk.check(repo="owner/demo", current="1.0.0", cache_path=cache)
-    assert set(json.loads(cache.read_text(encoding="utf-8"))) == {"other/repo", "owner/demo"}
+    assert set(json.loads(cache.read_text(encoding="utf-8"))) == {"other/repo", DEMO_URL}
 
 
 def test_check_default_cache_under_home(tmp_path, tags, monkeypatch):
@@ -474,9 +480,9 @@ def test_install_kind_bad_direct_url_does_not_raise(monkeypatch):
 
 def test_check_repairs_malformed_cache_entry(tmp_path, tags):
     cache = tmp_path / "state.json"
-    cache.write_text(json.dumps({"owner/demo": {"checked": "x", "latest": 7}}), encoding="utf-8")
+    cache.write_text(json.dumps({DEMO_URL: {"checked": "x", "latest": 7}}), encoding="utf-8")
     assert uk.check(repo="owner/demo", current="1.0.0", cache_path=cache) == "v1.1.0"
-    assert json.loads(cache.read_text(encoding="utf-8"))["owner/demo"]["latest"] == "v1.1.0"
+    assert json.loads(cache.read_text(encoding="utf-8"))[DEMO_URL]["latest"] == "v1.1.0"
 
 
 def test_latest_tag_never_prompts_over_ssh(monkeypatch):
@@ -491,3 +497,142 @@ def test_latest_tag_never_prompts_over_ssh(monkeypatch):
     uk.latest_tag("owner/demo", url="https://example.invalid/x.git")
     assert "BatchMode=yes" in seen["env"]["GIT_SSH_COMMAND"]
     assert seen["env"]["GIT_TERMINAL_PROMPT"] == "0"
+
+
+# --------------------------------------------------------------------------- security hardening
+
+
+@pytest.mark.parametrize("bad", [
+    "--upload-pack=touch X",
+    "-oProxyCommand=x",
+    "ext::sh -c 'touch X'",
+    "https://example.com/a b.git",
+    "https://example.com/a\nb.git",
+    "https://user:pass@example.com/x.git",
+    "https://token@example.com/x.git",
+    "ssh://user:pass@example.com/x.git",
+    "https://u:p@ss@example.com/x.git",
+    "http://example.com/x.git",
+    "/local/path",
+    "",
+])
+def test_repo_url_rejects_unsafe(bad, monkeypatch):
+    monkeypatch.delenv("UPDATE_KIT_REPO_URL", raising=False)
+    with pytest.raises(uk.UpdateError):
+        uk.latest_tag("owner/demo", url=bad)
+    monkeypatch.setenv("UPDATE_KIT_REPO_URL", bad or " ")
+    with pytest.raises(uk.UpdateError):
+        uk.latest_tag("owner/demo")
+
+
+@pytest.mark.parametrize("good", [
+    "https://example.com/x.git", "ssh://example.com/x.git", "git@example.com:o/x.git",
+    "ssh://git@example.com/o/x.git",
+    "file:///tmp/x",
+])
+def test_repo_url_accepts_expected_forms(good):
+    assert uk._repo_url("owner/demo", good) == good
+
+
+def test_latest_tag_argv_has_double_dash_and_runs_from_home(monkeypatch, tmp_path):
+    seen = {}
+
+    def fake(argv, **k):
+        seen.update(argv=argv, cwd=k.get("cwd"))
+        return subprocess.CompletedProcess(argv, 0, "abc\trefs/tags/v1.0.0\n", "")
+
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setenv("USERPROFILE", str(tmp_path))
+    monkeypatch.setattr(uk.subprocess, "run", fake)
+    uk.latest_tag("owner/demo", url="https://example.com/x.git")
+    assert seen["argv"][-2:] == ["--", "https://example.com/x.git"]
+    assert seen["argv"][1:3] == ["-c", "protocol.ext.allow=never"]
+    assert Path(seen["cwd"]) == tmp_path
+
+
+def test_upload_pack_payload_does_not_execute(tmp_path, isolated_git, monkeypatch):
+    marker = tmp_path / "pwned"
+    monkeypatch.setenv("UPDATE_KIT_REPO_URL", f"--upload-pack=touch {marker}")
+    assert uk.check(repo="owner/demo", current="1.0.0", cache_path=tmp_path / "s.json") is None
+    assert not marker.exists()
+
+
+def test_git_stderr_is_sanitized(monkeypatch):
+    def fake(argv, **k):
+        return subprocess.CompletedProcess(argv, 128, "", "fatal: \x1b[31mboom\x1b]0;x\x07 https://u:p@h/x\n")
+
+    monkeypatch.setattr(uk.subprocess, "run", fake)
+    with pytest.raises(uk.UpdateError) as err:
+        uk.latest_tag("owner/demo", url="https://example.com/x.git")
+    text = str(err.value)
+    assert "\x1b" not in text and "\x07" not in text and "u:p@" not in text
+
+
+def test_update_names_env_source_url(fake_env, monkeypatch):
+    monkeypatch.setenv("UPDATE_KIT_REPO_URL", "https://example.com/fork.git")
+    code, text = do_update(FakeRun())
+    assert code == 0 and "https://example.com/fork.git" in text.splitlines()[0]
+    code, text = do_update(FakeRun(), lang="zh-TW")
+    assert "https://example.com/fork.git" in text and "更新來源" in text
+    monkeypatch.delenv("UPDATE_KIT_REPO_URL")
+    assert "fork.git" not in do_update(FakeRun())[1]
+
+
+def test_update_invalid_env_url_returns_1(fake_env, monkeypatch):
+    monkeypatch.setenv("UPDATE_KIT_REPO_URL", "--upload-pack=x")
+    run = FakeRun()
+    assert do_update(run)[0] == 1 and not run.calls
+
+
+def test_update_install_runs_from_home(fake_env, monkeypatch, tmp_path):
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setenv("USERPROFILE", str(tmp_path))
+    run = FakeRun()
+    do_update(run)
+    assert Path(run.kwargs[0]["cwd"]) == tmp_path
+
+
+def test_spawn_detached_uses_home_cwd(monkeypatch, tmp_path):
+    seen = {}
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setenv("USERPROFILE", str(tmp_path))
+    monkeypatch.setattr(uk.subprocess, "CREATE_NO_WINDOW", 0, raising=False)
+    monkeypatch.setattr(uk.subprocess, "CREATE_NEW_PROCESS_GROUP", 0, raising=False)
+    monkeypatch.setattr(uk.subprocess, "Popen", lambda *a, **k: seen.update(k))
+    uk._spawn_detached("cmd", str(tmp_path / "logs" / "x.log"))
+    assert Path(seen["cwd"]) == tmp_path
+
+
+def test_latest_tag_huge_digits_and_whitespace_tags_ignored(monkeypatch):
+    def fake(argv, **k):
+        out = f"a\trefs/tags/v{'9' * 5000}.0.0\nb\trefs/tags/v1.0.0 \nc\trefs/tags/v1.0.1\n"
+        return subprocess.CompletedProcess(argv, 0, out, "")
+
+    monkeypatch.setattr(uk.subprocess, "run", fake)
+    assert uk.latest_tag("owner/demo", url="https://example.com/x.git") == "v1.0.1"
+
+
+def test_check_never_returns_whitespace_tag_from_cache(tmp_path, tags):
+    cache = tmp_path / "state.json"
+    cache.write_text(json.dumps({DEMO_URL: {"checked": time.time(), "latest": "v9.0.0 "}}), encoding="utf-8")
+    assert uk.check(repo="owner/demo", current="1.0.0", cache_path=cache) == "v1.1.0"
+
+
+def test_check_cache_keyed_by_url_not_repo(tmp_path, tags):
+    cache = tmp_path / "state.json"
+    tags["result"] = "v5.0.0"
+    assert uk.check(repo="owner/demo", current="1.0.0", cache_path=cache,
+                    url="https://example.com/evil.git") == "v5.0.0"
+    tags["result"] = "v1.1.0"
+    assert uk.check(repo="owner/demo", current="1.0.0", cache_path=cache) == "v1.1.0"
+    assert tags["calls"] == 2
+
+
+def test_update_scp_url_installs_over_ssh_url(fake_env):
+    run = FakeRun()
+    assert do_update(run, url="git@example.com:o/x.git")[0] == 0
+    assert run.calls[0][-1] == "git+ssh://git@example.com/o/x.git@v1.1.0"
+
+
+def test_clean_strips_controls_before_redacting_userinfo():
+    assert "u:p@" not in uk._clean("https:\x00//u:p@h/x") and "u:p@" not in uk._clean("https://u:p@ss@h/x")
