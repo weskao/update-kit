@@ -91,6 +91,21 @@ uv run ruff check .
 uv build
 ```
 
+## CI notifications
+
+`.github/workflows/ci.yml` runs the test matrix (macOS/Linux/Windows) on every push and PR,
+then a separate `notify-telegram` job sends a Telegram message only when the test job fails on
+a `push` (never on green runs, never on `pull_request`, to avoid pinging on forks/external PRs).
+Configure it once per repo:
+
+```bash
+gh secret set TELEGRAM_BOT_TOKEN
+gh secret set TELEGRAM_CHAT_ID
+```
+
+Unconfigured secrets are a valid state — the job skips quietly instead of failing a second time
+on top of the real failure.
+
 ## License
 
 MIT
