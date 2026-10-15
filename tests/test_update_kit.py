@@ -306,14 +306,15 @@ def test_update_zh_tw_messages(fake_env):
 
 def test_update_windows_spawns_detached_chain(fake_env, monkeypatch):
     spawned = []
-    monkeypatch.setattr(uk, "_spawn_detached", lambda cmdline, log: spawned.append((cmdline, log)))
+    monkeypatch.setattr(uk, "_spawn_detached", lambda cmdline, log, env=None: spawned.append((cmdline, log, env)))
     monkeypatch.setattr(uk, "_IS_WINDOWS", True)
     run = FakeRun()
     code, out = do_update(run, after=[["demo", "migrate"]])
     assert code == 0
     assert "update continues in the background" in out
     assert run.calls == []
-    (cmdline, log), = spawned
+    (cmdline, log, env), = spawned
+    assert env["GIT_TERMINAL_PROMPT"] == "0" and env["GCM_INTERACTIVE"] == "never"
     assert log.endswith("demo-update.log")
     install = "uv tool install --force --no-sources git+https://github.com/owner/demo.git@v1.1.0"
     assert install in cmdline
@@ -362,6 +363,14 @@ def test_check_refetches_after_ttl(tmp_path, tags):
     cache.write_text(json.dumps({DEMO_URL: {"checked": time.time() - 100, "latest": "v1.0.5"}}),
                      encoding="utf-8")
     assert uk.check(repo="owner/demo", current="1.0.0", cache_path=cache, ttl=50) == "v1.1.0"
+    assert tags["calls"] == 1
+
+
+def test_check_future_timestamp_cache_is_stale(tmp_path, tags):
+    cache = tmp_path / "state.json"  # clock skew / tampering: a future `checked` must not pin the cache
+    cache.write_text(json.dumps({DEMO_URL: {"checked": time.time() + 10_000, "latest": "v1.0.5"}}),
+                     encoding="utf-8")
+    assert uk.check(repo="owner/demo", current="1.0.0", cache_path=cache) == "v1.1.0"
     assert tags["calls"] == 1
 
 
@@ -419,7 +428,7 @@ def test_hint_zh_tw():
 
 @pytest.mark.parametrize("value, expected", [
     ("zh_TW", "zh-TW"), ("zh-tw", "zh-TW"), ("zh-Hant", "zh-TW"), ("zh_HK", "zh-TW"),
-    ("zh-Hant-TW", "zh-TW"), ("zh_TW.UTF-8", "zh-TW"), ("zh-TW", "zh-TW"),
+    ("zh-Hant-TW", "zh-TW"), ("zh_TW.UTF-8", "zh-TW"), ("zh_MO", "zh-TW"), ("zh-TW", "zh-TW"),
     ("en", "en"), ("zh-CN", "en"), ("fr", "en"), ("", "en"), (None, "en"),
 ])
 def test_normalize_lang(value, expected):
@@ -490,6 +499,7 @@ def test_latest_tag_never_prompts_over_ssh(monkeypatch):
 
     def fake(argv, **k):
         seen["env"] = k["env"]
+        seen["stdin"] = k.get("stdin")
         return subprocess.CompletedProcess(argv, 0, "abc\trefs/tags/v1.0.0\n", "")
 
     monkeypatch.delenv("GIT_SSH_COMMAND", raising=False)
@@ -497,6 +507,8 @@ def test_latest_tag_never_prompts_over_ssh(monkeypatch):
     uk.latest_tag("owner/demo", url="https://example.invalid/x.git")
     assert "BatchMode=yes" in seen["env"]["GIT_SSH_COMMAND"]
     assert seen["env"]["GIT_TERMINAL_PROMPT"] == "0"
+    assert seen["env"]["GCM_INTERACTIVE"] == "never"
+    assert seen["stdin"] is subprocess.DEVNULL
 
 
 # --------------------------------------------------------------------------- security hardening
@@ -582,6 +594,15 @@ def test_update_invalid_env_url_returns_1(fake_env, monkeypatch):
     monkeypatch.setenv("UPDATE_KIT_REPO_URL", "--upload-pack=x")
     run = FakeRun()
     assert do_update(run)[0] == 1 and not run.calls
+
+
+@pytest.mark.parametrize("kind", ["uv", "pipx"])
+def test_update_install_never_prompts_for_git_credentials(fake_env, kind):
+    fake_env["kind"] = (kind, None)
+    run = FakeRun()
+    do_update(run)
+    env = run.kwargs[0]["env"]
+    assert env["GIT_TERMINAL_PROMPT"] == "0" and env["GCM_INTERACTIVE"] == "never"
 
 
 def test_update_install_runs_from_home(fake_env, monkeypatch, tmp_path):

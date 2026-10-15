@@ -40,6 +40,7 @@ __all__ = [
 ]
 
 _IS_WINDOWS = os.name == "nt"  # the running exe is locked there; tests patch this flag
+_NO_PROMPT = {"GIT_TERMINAL_PROMPT": "0", "GCM_INTERACTIVE": "never"}  # fail instead of asking for credentials
 
 _STRICT = re.compile(r"v?([0-9]{1,9})\.([0-9]{1,9})\.([0-9]{1,9})")
 _CONTROL = re.compile(r"[\x00-\x1f\x7f-\x9f]")
@@ -121,8 +122,7 @@ def latest_tag(repo: str, *, timeout: float = 5, url: str | None = None) -> str:
     env = {
         "GIT_SSH_COMMAND": "ssh -o BatchMode=yes",
         **os.environ,
-        "GIT_TERMINAL_PROMPT": "0",
-        "GCM_INTERACTIVE": "never",
+        **_NO_PROMPT,
         "GIT_HTTP_LOW_SPEED_LIMIT": "1",
         "GIT_HTTP_LOW_SPEED_TIME": str(max(1, round(timeout))),
     }
@@ -185,13 +185,13 @@ def _windows_chain(commands: Sequence[Sequence[str]], log: str) -> str:
     return f'cmd.exe /d /s /c "{wait} & ({chain}) > {subprocess.list2cmdline([log])} 2>&1"'
 
 
-def _spawn_detached(cmdline: str, log: str) -> None:  # pragma: no cover - Windows only
+def _spawn_detached(cmdline: str, log: str, env: dict | None = None) -> None:  # pragma: no cover - Windows only
     os.makedirs(os.path.dirname(log), exist_ok=True)
     # CREATE_NO_WINDOW (not DETACHED_PROCESS): children inherit a hidden console, no flashing.
     flags = subprocess.CREATE_NO_WINDOW | subprocess.CREATE_NEW_PROCESS_GROUP
     # cwd=home: cmd.exe searches the cwd first, so a planted uv.bat/crw.exe there must not run.
     subprocess.Popen(cmdline, creationflags=flags, close_fds=True, stdin=subprocess.DEVNULL,
-                     stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, cwd=str(Path.home()))
+                     stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, cwd=str(Path.home()), env=env)
 
 
 def update(*, app: str, repo: str, dist: str, current: str | None = None, lang: str = "en",
@@ -240,7 +240,7 @@ def update(*, app: str, repo: str, dist: str, current: str | None = None, lang: 
             _say(out, _msg(lang, "install_failed", app=app, error=f"unsafe for cmd.exe: {unsafe[0]}"))
             return 1
         try:
-            _spawn_detached(_windows_chain([install, *after], log), log)
+            _spawn_detached(_windows_chain([install, *after], log), log, {**os.environ, **_NO_PROMPT})
         except OSError as exc:
             _say(out, _msg(lang, "install_failed", app=app, error=exc))
             return 1
@@ -248,7 +248,7 @@ def update(*, app: str, repo: str, dist: str, current: str | None = None, lang: 
         return 0
     _say(out, _msg(lang, "installing", app=app, current=shown, latest=latest))
     try:
-        code = run(install, cwd=Path.home()).returncode
+        code = run(install, cwd=Path.home(), env={**os.environ, **_NO_PROMPT}).returncode
     except OSError as exc:
         _say(out, _msg(lang, "install_failed", app=app, error=exc))
         return 1

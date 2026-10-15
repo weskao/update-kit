@@ -79,7 +79,8 @@ outcome is only in the log. An install whose arguments or log path contain a `cm
 metacharacter (`& | < > ^ % " ( ) !`) is refused with exit 1 instead of being spawned.
 
 `git ls-remote` never prompts: `GIT_TERMINAL_PROMPT=0`, and `GIT_SSH_COMMAND` defaults to
-`ssh -o BatchMode=yes` when unset.
+`ssh -o BatchMode=yes` when unset. The install step (uv / pipx) also runs with
+`GIT_TERMINAL_PROMPT=0` and `GCM_INTERACTIVE=never`.
 
 ## Development
 

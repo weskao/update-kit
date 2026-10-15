@@ -1,3 +1,11 @@
+## [Unreleased]
+
+### 🔒 Security
+
+- The install step (uv / pipx, and the Windows detached chain) runs with `GIT_TERMINAL_PROMPT=0`
+  and `GCM_INTERACTIVE=never`, so the installer's own git fetch fails instead of blocking on a
+  credential prompt
+
 ## [0.1.0] - 2026-10-15
 
 ### 🚀 Features
