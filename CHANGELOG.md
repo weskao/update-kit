@@ -1,3 +1,18 @@
+## [0.1.0] - 2026-10-15
+
+### 🚀 Features
+
+- Add update-kit 0.1.0
+
+### 🐛 Bug Fixes
+
+- Harden update chain, tag parsing and cache repair
+- **security:** Validate repo URL, end-of-options before URL, run git/install from home
+- Install step never prompts for git credentials; test: kill 4 surviving mutants
+
+### ⚙️ Miscellaneous Tasks
+
+- Add tag-triggered PyPI release workflow
 ## [Unreleased]
 
 ### 🔒 Security
