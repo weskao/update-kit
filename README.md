@@ -1,6 +1,6 @@
 # update-kit
 
-Self-update for Python CLIs that are released as git tags (`vX.Y.Z`) and installed with
+Self-update for Python CLIs that are released as git tags (`vX.Y.Z` or `X.Y.Z`) and installed with
 `uv tool` or `pipx`. Stdlib only, Python ≥ 3.10, macOS / Linux / Windows.
 
 - `<cmd> update` installs the newest release tag — no prompts, ever.
@@ -49,7 +49,7 @@ def main(argv=None):
 
 | Function | Does |
 |---|---|
-| `latest_tag(repo, *, timeout=5, url=None) -> str` | Newest strict `vX.Y.Z` tag via `git ls-remote --tags --refs`. Prereleases and other names are ignored. Raises `UpdateError` (offline, no tags, git missing). |
+| `latest_tag(repo, *, timeout=5, url=None) -> str` | Newest strict `v?X.Y.Z` tag (ASCII digits) via `git ls-remote --tags --refs`. Prereleases and other names are ignored. Raises `UpdateError` (offline, no tags, git missing). |
 | `install_kind(dist) -> (kind, detail)` | `"dev"` (PEP 610 local/editable dir, detail = the dir), `"uv"` / `"pipx"` (from `sys.prefix`), else `"unknown"`. |
 | `update(*, app, repo, dist, current=None, lang="en", after=(), out=sys.stderr, run=subprocess.run, url=None) -> int` | Exit code: **0** updated or already up to date · **1** couldn't check (offline/rate limit) or install/after-step failed · **2** dev install (use `git pull`) or unknown install (manual command printed). |
 | `check(*, repo, current, cache_path=None, ttl=86400, timeout=1.5, url=None) -> str \| None` | Newer tag or `None`. Never raises. Results — failures too — are cached for `ttl` in `$HOME/.update-kit/state.json`, keyed by repo. |
@@ -68,7 +68,13 @@ Install commands used by `update`:
 **Windows:** the running `.exe` is locked, so `update` starts the install (and the `after`
 steps, chained with `&&`) in a detached `cmd.exe` that waits a few seconds for the app to
 exit, returns 0 and says the update continues in the background. Output goes to
-`%USERPROFILE%\.update-kit\<app>-update.log`.
+`%USERPROFILE%\.update-kit\<app>-update.log`. Unlike POSIX (where every after-step runs and
+any failure makes the result 1), the Windows chain stops at the first failing step and the
+outcome is only in the log. An install whose arguments or log path contain a `cmd.exe`
+metacharacter (`& | < > ^ % " ( ) !`) is refused with exit 1 instead of being spawned.
+
+`git ls-remote` never prompts: `GIT_TERMINAL_PROMPT=0`, and `GIT_SSH_COMMAND` defaults to
+`ssh -o BatchMode=yes` when unset.
 
 ## Development
 

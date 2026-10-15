@@ -442,3 +442,52 @@ def test_public_api():
     for name in ("UpdateError", "latest_tag", "install_kind", "update", "check", "hint",
                  "should_hint", "normalize_lang"):
         assert callable(getattr(uk, name))
+
+
+# --------------------------------------------------------------------------- review hardening
+
+
+def test_parse_rejects_non_ascii_digits():
+    assert uk._parse("v١.٢.٣") is None
+
+
+def test_update_windows_refuses_cmd_metacharacters(fake_env, monkeypatch):
+    spawned = []
+    monkeypatch.setattr(uk, "_spawn_detached", lambda cmdline, log: spawned.append(cmdline))
+    monkeypatch.setattr(uk, "_IS_WINDOWS", True)
+    code, out = do_update(FakeRun(), url="https://example.invalid/r.git?a=1&calc")
+    assert code == 1 and spawned == []
+    assert "failed" in out
+
+
+def test_update_manual_command_is_shell_quoted_on_posix(fake_env):
+    fake_env["kind"] = ("unknown", None)
+    _, out = do_update(FakeRun(), url="https://example.invalid/r.git?a=1&b=2")
+    assert "'git+https://example.invalid/r.git?a=1&b=2@v1.1.0'" in out
+
+
+def test_install_kind_bad_direct_url_does_not_raise(monkeypatch):
+    dist = FakeDist({"url": 42, "dir_info": {}})
+    monkeypatch.setattr(uk.metadata, "distribution", lambda name: dist)
+    assert uk.install_kind("demo")[0] == "dev"
+
+
+def test_check_repairs_malformed_cache_entry(tmp_path, tags):
+    cache = tmp_path / "state.json"
+    cache.write_text(json.dumps({"owner/demo": {"checked": "x", "latest": 7}}), encoding="utf-8")
+    assert uk.check(repo="owner/demo", current="1.0.0", cache_path=cache) == "v1.1.0"
+    assert json.loads(cache.read_text(encoding="utf-8"))["owner/demo"]["latest"] == "v1.1.0"
+
+
+def test_latest_tag_never_prompts_over_ssh(monkeypatch):
+    seen = {}
+
+    def fake(argv, **k):
+        seen["env"] = k["env"]
+        return subprocess.CompletedProcess(argv, 0, "abc\trefs/tags/v1.0.0\n", "")
+
+    monkeypatch.delenv("GIT_SSH_COMMAND", raising=False)
+    monkeypatch.setattr(uk.subprocess, "run", fake)
+    uk.latest_tag("owner/demo", url="https://example.invalid/x.git")
+    assert "BatchMode=yes" in seen["env"]["GIT_SSH_COMMAND"]
+    assert seen["env"]["GIT_TERMINAL_PROMPT"] == "0"

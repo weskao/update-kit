@@ -21,6 +21,7 @@ from __future__ import annotations
 import json
 import os
 import re
+import shlex
 import subprocess
 import sys
 import time
@@ -40,7 +41,9 @@ __all__ = [
 
 _IS_WINDOWS = os.name == "nt"  # the running exe is locked there; tests patch this flag
 
-_STRICT = re.compile(r"v?(\d+)\.(\d+)\.(\d+)")
+_STRICT = re.compile(r"v?([0-9]+)\.([0-9]+)\.([0-9]+)")
+# cmd.exe would interpret these inside the detached chain; such updates are refused.
+_CMD_META = re.compile(r'[&|<>^%"()!\r\n]')
 
 _MESSAGES = {
     "en": {
@@ -98,8 +101,16 @@ def _say(out: TextIO, text: str) -> None:
 def latest_tag(repo: str, *, timeout: float = 5, url: str | None = None) -> str:
     """Newest strict ``vX.Y.Z`` tag of github.com/<repo>; raises UpdateError."""
     target = _repo_url(repo, url)
-    # No credential prompt for a private/missing repo: fail instead of blocking on stdin.
-    env = {**os.environ, "GIT_TERMINAL_PROMPT": "0", "GCM_INTERACTIVE": "never"}
+    # No credential/passphrase prompt for a private/missing repo: fail instead of blocking.
+    # Low-speed limits stop a stalled HTTP transfer that outlives the killed git process.
+    env = {
+        "GIT_SSH_COMMAND": "ssh -o BatchMode=yes",
+        **os.environ,
+        "GIT_TERMINAL_PROMPT": "0",
+        "GCM_INTERACTIVE": "never",
+        "GIT_HTTP_LOW_SPEED_LIMIT": "1",
+        "GIT_HTTP_LOW_SPEED_TIME": str(max(1, round(timeout))),
+    }
     try:
         result = subprocess.run(
             ["git", "ls-remote", "--tags", "--refs", target],
@@ -133,7 +144,10 @@ def install_kind(dist: str) -> tuple[str, str | None]:
     except (OSError, ValueError):
         direct = {}
     if isinstance(direct, dict) and "dir_info" in direct:  # PEP 610: editable or local dir
-        return "dev", url2pathname(urlparse(direct.get("url", "")).path)
+        try:
+            return "dev", url2pathname(urlparse(direct.get("url", "")).path)
+        except Exception:  # noqa: BLE001 - malformed metadata must not break `update`
+            return "dev", str(direct.get("url"))
     prefix = Path(sys.prefix)
     parents = [part.lower() for part in prefix.parent.parts]
     # uv: <uv data>/tools/<name> (UV_TOOL_DIR overrides); pipx: <pipx home>/venvs/<name>.
@@ -157,7 +171,8 @@ def _windows_chain(commands: Sequence[Sequence[str]], log: str) -> str:
 
 def _spawn_detached(cmdline: str, log: str) -> None:  # pragma: no cover - Windows only
     os.makedirs(os.path.dirname(log), exist_ok=True)
-    flags = subprocess.DETACHED_PROCESS | subprocess.CREATE_NEW_PROCESS_GROUP
+    # CREATE_NO_WINDOW (not DETACHED_PROCESS): children inherit a hidden console, no flashing.
+    flags = subprocess.CREATE_NO_WINDOW | subprocess.CREATE_NEW_PROCESS_GROUP
     subprocess.Popen(cmdline, creationflags=flags, close_fds=True, stdin=subprocess.DEVNULL,
                      stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 
@@ -192,11 +207,16 @@ def update(*, app: str, repo: str, dist: str, current: str | None = None, lang: 
     elif kind == "pipx":
         install = ["pipx", "install", "--force", spec]
     else:
-        command = subprocess.list2cmdline(["python", "-m", "pip", "install", "--upgrade", spec])
+        argv = ["python", "-m", "pip", "install", "--upgrade", spec]
+        command = subprocess.list2cmdline(argv) if _IS_WINDOWS else shlex.join(argv)
         _say(out, _msg(lang, "manual", app=app, latest=latest, current=shown, command=command))
         return 2
     if _IS_WINDOWS:
         log = os.path.join(os.path.expanduser("~"), ".update-kit", f"{app}-update.log")
+        unsafe = [arg for arg in [log, *install, *(a for step in after for a in step)] if _CMD_META.search(arg)]
+        if unsafe:
+            _say(out, _msg(lang, "install_failed", app=app, error=f"unsafe for cmd.exe: {unsafe[0]}"))
+            return 1
         try:
             _spawn_detached(_windows_chain([install, *after], log), log)
         except OSError as exc:
@@ -240,8 +260,11 @@ def check(*, repo: str, current: str, cache_path: Path | None = None, ttl: int =
             state = {}
         entry = state.get(repo)
         now = time.time()
-        if isinstance(entry, dict) and 0 <= now - entry.get("checked", 0) < ttl:
-            latest = entry.get("latest")
+        checked = entry.get("checked") if isinstance(entry, dict) else None
+        cached = entry.get("latest") if isinstance(entry, dict) else None
+        valid = isinstance(checked, (int, float)) and (cached is None or isinstance(cached, str))
+        if valid and 0 <= now - checked < ttl:
+            latest = cached
         else:
             try:
                 latest = latest_tag(repo, timeout=timeout, url=url)
