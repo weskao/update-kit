@@ -536,7 +536,8 @@ def test_should_hint():
 
 
 def test_public_api():
-    assert uk.__version__ == "0.1.0"
+    # A strict X.Y.Z, not a pinned value: the release script bumps __version__ before CI runs this.
+    assert uk._parse(uk.__version__) is not None and not uk.__version__.startswith("v")
     for name in ("UpdateError", "latest_tag", "install_kind", "update", "check", "hint",
                  "should_hint", "normalize_lang"):
         assert callable(getattr(uk, name))
