@@ -22,6 +22,7 @@ import json
 import os
 import re
 import shlex
+import shutil
 import subprocess
 import sys
 import time
@@ -52,26 +53,26 @@ _CMD_META = re.compile(r'[&|<>^%"()!\r\n]')
 
 _MESSAGES = {
     "en": {
-        "dev": "{app}: dev install from {dir}; use git pull to update",
-        "check_failed": "{app}: couldn't check for updates ({error})",
-        "up_to_date": "{app} {current} is already up to date",
+        "check_failed": "❌ {app}: couldn't check for updates ({error})",
+        "up_to_date": "✅ {app} {current} is already the latest version ({latest}).",
         "manual": "{app} {latest} is available (you have {current}). Install it manually:\n  {command}",
-        "installing": "Updating {app} {current} -> {latest} ...",
-        "install_failed": "{app}: update failed ({error})",
-        "updated": "{app} updated to {latest}",
+        "installing": "⬆️  Updating {app} {current} → {latest} via `{command}` ...",
+        "install_failed": "❌ {app}: update failed ({error})",
+        "updated": "🎉 {app} updated to {latest}!",
+        "left_alone": "ℹ️  Installed as a {tool} tool; the copy at {dir} is unchanged.",
         "after_failed": "warning: `{step}` failed after the update ({error})",
         "background": "{app} {latest}: update continues in the background (log: {log})",
         "hint": "{cmd} {latest} is available (you have {current}) — run `{cmd} update`",
         "source": "{app}: using update source {url} (UPDATE_KIT_REPO_URL)",
     },
     "zh-TW": {
-        "dev": "{app}：開發版安裝（{dir}），請用 git pull 更新",
-        "check_failed": "{app}：無法檢查更新（{error}）",
-        "up_to_date": "{app} {current} 已是最新版本",
+        "check_failed": "❌ {app}：無法檢查更新（{error}）",
+        "up_to_date": "✅ {app} {current} 已是最新版本（{latest}）。",
         "manual": "{app} {latest} 可更新（目前為 {current}），請手動安裝：\n  {command}",
-        "installing": "正在更新 {app} {current} -> {latest} ...",
-        "install_failed": "{app}：更新失敗（{error}）",
-        "updated": "{app} 已更新至 {latest}",
+        "installing": "⬆️  正在更新 {app} {current} → {latest}，執行 `{command}` ...",
+        "install_failed": "❌ {app}：更新失敗（{error}）",
+        "updated": "🎉 {app} 已更新至 {latest}！",
+        "left_alone": "ℹ️  已安裝為 {tool} 工具；{dir} 的原本那份沒有變更。",
         "after_failed": "警告：更新後執行 `{step}` 失敗（{error}）",
         "background": "{app} {latest}：更新將在背景繼續（記錄檔：{log}）",
         "hint": "{cmd} {latest} 可更新（目前為 {current}）— 執行 `{cmd} update`",
@@ -178,6 +179,17 @@ def install_kind(dist: str) -> tuple[str, str | None]:
     return "unknown", str(prefix)
 
 
+def _installed_revision(dist: str) -> str | None:
+    """The git ref a PEP 610 VCS install was requested at (``v1.2.0``, ``main``); ``""`` for
+    a VCS install with no ref (the default branch); None when it is not a VCS install."""
+    try:
+        direct = json.loads(metadata.distribution(dist).read_text("direct_url.json") or "{}")
+        revision = direct["vcs_info"].get("requested_revision")
+        return revision if isinstance(revision, str) else ""
+    except Exception:  # noqa: BLE001 - not installed, not a VCS install, malformed record
+        return None
+
+
 def _windows_chain(commands: Sequence[Sequence[str]], log: str) -> str:
     """One cmd.exe line: wait for the caller to exit (its exe is locked), then run *commands*."""
     chain = " && ".join(subprocess.list2cmdline(list(argv)) for argv in commands)
@@ -197,11 +209,11 @@ def _spawn_detached(cmdline: str, log: str, env: dict | None = None) -> None:  #
 def update(*, app: str, repo: str, dist: str, current: str | None = None, lang: str = "en",
            after: Sequence[Sequence[str]] = (), out: TextIO = sys.stderr,
            run: Callable = subprocess.run, url: str | None = None) -> int:
-    """Install the newest release. 0 updated/up to date, 1 failure, 2 dev/unknown install."""
+    """Install the newest release tag. 0 updated/up to date, 1 failure, 2 no installer found.
+
+    Up to date means installed from exactly that tag; anything else (a dev checkout, a
+    branch or commit, a newer build, an unmanaged install) is replaced by it."""
     kind, detail = install_kind(dist)
-    if kind == "dev":
-        _say(out, _msg(lang, "dev", app=app, dir=detail))
-        return 2
     if current is None:
         try:
             current = metadata.version(dist)
@@ -215,15 +227,20 @@ def update(*, app: str, repo: str, dist: str, current: str | None = None, lang: 
     except UpdateError as exc:
         _say(out, _msg(lang, "check_failed", app=app, error=exc))
         return 1
-    have = _parse(current)
-    if have and have >= _parse(latest):
-        _say(out, _msg(lang, "up_to_date", app=app, current=current))
+    revision = _installed_revision(dist)
+    if kind in ("uv", "pipx") and _parse(current) == _parse(latest) and revision in (None, latest):
+        _say(out, _msg(lang, "up_to_date", app=app, current=current, latest=latest))
         return 0
     # An unparseable/unknown current version is treated as older: the user asked to update.
     # pip/uv can't parse the scp form (git@host:path); install over the equivalent ssh:// URL.
     source = re.sub(r"^git@([^:]+):/?", r"ssh://git@\1/", target)
     spec = f"git+{source}@{latest}"
     shown = current or "?"
+    # A checkout or unmanaged install becomes a separate tool install of the tag; it stays as it was.
+    left_alone = detail if kind in ("dev", "unknown") else None
+    if kind in ("dev", "unknown"):
+        kind = next((tool for tool in ("uv", "pipx") if shutil.which(tool)), "unknown")
+    note = _msg(lang, "left_alone", tool=kind, dir=left_alone) if left_alone else None
     if kind == "uv":
         install = ["uv", "tool", "install", "--force", "--no-sources", spec]
     elif kind == "pipx":
@@ -245,8 +262,10 @@ def update(*, app: str, repo: str, dist: str, current: str | None = None, lang: 
             _say(out, _msg(lang, "install_failed", app=app, error=exc))
             return 1
         _say(out, _msg(lang, "background", app=app, latest=latest, log=log))
+        if note:
+            _say(out, note)
         return 0
-    _say(out, _msg(lang, "installing", app=app, current=shown, latest=latest))
+    _say(out, _msg(lang, "installing", app=app, current=shown, latest=latest, command=shlex.join(install)))
     try:
         code = run(install, cwd=Path.home(), env={**os.environ, **_NO_PROMPT}).returncode
     except OSError as exc:
@@ -256,6 +275,8 @@ def update(*, app: str, repo: str, dist: str, current: str | None = None, lang: 
         _say(out, _msg(lang, "install_failed", app=app, error=f"exit {code}"))
         return 1
     _say(out, _msg(lang, "updated", app=app, latest=latest))
+    if note:
+        _say(out, note)
     result = 0
     for step in after:
         step = list(step)

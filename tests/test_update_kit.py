@@ -59,8 +59,11 @@ def make_repo(path, tags):
 
 @pytest.fixture
 def fake_env(monkeypatch):
-    """update() with a uv install, latest v1.1.0, no network."""
-    state = {"kind": ("uv", None), "latest": "v1.1.0", "tag_calls": []}
+    """update() with a uv install, latest v1.1.0, no network.
+
+    ``direct_url`` is the install's PEP 610 record (None: none); ``on_path`` the installers found."""
+    state = {"kind": ("uv", None), "latest": "v1.1.0", "tag_calls": [], "direct_url": None,
+             "on_path": {"uv", "pipx"}}
     # Real Windows CI must not spawn a detached installer from the POSIX-path tests.
     monkeypatch.setattr(uk, "_IS_WINDOWS", False)
 
@@ -72,6 +75,8 @@ def fake_env(monkeypatch):
 
     monkeypatch.setattr(uk, "install_kind", lambda dist: state["kind"])
     monkeypatch.setattr(uk, "latest_tag", latest_tag)
+    monkeypatch.setattr(uk.metadata, "distribution", lambda name: FakeDist(state["direct_url"]))
+    monkeypatch.setattr(uk.shutil, "which", lambda cmd: f"/bin/{cmd}" if cmd in state["on_path"] else None)
     return state
 
 
@@ -225,13 +230,39 @@ def test_update_passes_url_through(fake_env):
     assert run.calls[0][-1] == "git+file:///srv/demo@v1.1.0"
 
 
-def test_update_already_up_to_date(fake_env):
+def test_update_already_on_the_latest_tag_says_so_with_the_version(fake_env):
     run = FakeRun()
-    for current in ("1.1.0", "v1.1.0", "1.2.0"):
+    for current in ("1.1.0", "v1.1.0"):
         code, out = do_update(run, current=current)
         assert code == 0
-        assert "already up to date" in out
+        assert out.strip() == f"✅ demo {current} is already the latest version (v1.1.0)."
     assert run.calls == []
+
+
+def test_update_installed_from_the_latest_tag_is_up_to_date(fake_env):
+    fake_env["direct_url"] = {"url": "https://github.com/owner/demo.git",
+                              "vcs_info": {"vcs": "git", "requested_revision": "v1.1.0"}}
+    run = FakeRun()
+    assert do_update(run, current="1.1.0")[0] == 0
+    assert run.calls == []
+
+
+@pytest.mark.parametrize("current, vcs_info", [
+    ("1.2.0", None),
+    ("1.1.0", {"vcs": "git", "requested_revision": "main"}),
+    ("1.1.0", {"vcs": "git", "requested_revision": "0123abc"}),
+    ("1.1.0", {"vcs": "git", "commit_id": "0123abc"}),  # `git+URL` with no ref: the default branch
+])
+def test_update_off_the_latest_tag_reinstalls_that_tag(fake_env, current, vcs_info):
+    """A newer build, or one installed from a branch/commit, is replaced by the newest tag."""
+    if vcs_info:
+        fake_env["direct_url"] = {"url": "https://github.com/owner/demo.git", "vcs_info": vcs_info}
+    run = FakeRun()
+    code, out = do_update(run, current=current)
+    assert code == 0
+    assert run.calls == [["uv", "tool", "install", "--force", "--no-sources",
+                          "git+https://github.com/owner/demo.git@v1.1.0"]]
+    assert "already" not in out
 
 
 def test_update_couldnt_check_is_failure_not_up_to_date(fake_env):
@@ -273,17 +304,57 @@ def test_update_failing_after_step_warns_and_returns_1(fake_env):
     assert run.calls[-1] == ["other", "step"]
 
 
-def test_update_dev_install_returns_2_without_network(fake_env):
-    fake_env["kind"] = ("dev", "/src/demo")
+@pytest.mark.parametrize("kind", [("dev", "/src/demo"), ("unknown", None)])
+@pytest.mark.parametrize("current", ["1.0.0", "1.1.0", "9.0.0"])
+def test_update_dev_or_unknown_install_is_replaced_by_the_latest_tag(fake_env, kind, current):
+    """A local checkout or unmanaged install is never kept, whatever version it reports."""
+    fake_env["kind"] = kind
     run = FakeRun()
-    code, out = do_update(run)
-    assert code == 2
-    assert "/src/demo" in out and "git pull" in out
-    assert fake_env["tag_calls"] == [] and run.calls == []
+    code, out = do_update(run, current=current)
+    assert code == 0
+    assert run.calls == [["uv", "tool", "install", "--force", "--no-sources",
+                          "git+https://github.com/owner/demo.git@v1.1.0"]]
+    assert "git pull" not in out and "manually" not in out
 
 
-def test_update_unknown_kind_prints_manual_command(fake_env):
+@pytest.mark.parametrize("lang, note", [
+    ("en", "ℹ️  Installed as a uv tool; the copy at /src/demo is unchanged."),
+    ("zh-TW", "ℹ️  已安裝為 uv 工具；/src/demo 的原本那份沒有變更。"),
+])
+def test_update_dev_install_says_the_local_copy_is_left_alone(fake_env, lang, note):
+    """`--force` installs a separate tool copy; the checkout (or venv) the user ran stays as it was."""
+    fake_env["kind"] = ("dev", "/src/demo")
+    _, out = do_update(FakeRun(), lang=lang)
+    assert out.splitlines()[-1] == note
+
+
+def test_update_uv_install_has_no_local_copy_note(fake_env):
+    _, out = do_update(FakeRun())
+    assert "unchanged" not in out
+
+
+def test_update_windows_dev_install_spawns_the_uv_install(fake_env, monkeypatch):
+    spawned = []
+    monkeypatch.setattr(uk, "_spawn_detached", lambda cmdline, log, env=None: spawned.append(cmdline))
+    monkeypatch.setattr(uk, "_IS_WINDOWS", True)
+    fake_env["kind"] = ("dev", "C:\\src\\demo")
+    code, out = do_update(FakeRun())
+    assert code == 0
+    assert "uv tool install --force --no-sources git+https://github.com/owner/demo.git@v1.1.0" in spawned[0]
+    assert out.splitlines()[-1] == "ℹ️  Installed as a uv tool; the copy at C:\\src\\demo is unchanged."
+
+
+def test_update_dev_install_falls_back_to_pipx(fake_env):
+    fake_env["kind"] = ("dev", "/src/demo")
+    fake_env["on_path"] = {"pipx"}
+    run = FakeRun()
+    assert do_update(run)[0] == 0
+    assert run.calls == [["pipx", "install", "--force", "git+https://github.com/owner/demo.git@v1.1.0"]]
+
+
+def test_update_unknown_kind_without_an_installer_prints_manual_command(fake_env):
     fake_env["kind"] = ("unknown", None)
+    fake_env["on_path"] = set()
     run = FakeRun()
     code, out = do_update(run)
     assert code == 2
@@ -291,17 +362,29 @@ def test_update_unknown_kind_prints_manual_command(fake_env):
     assert run.calls == []
 
 
+def test_update_announces_the_command_and_celebrates(fake_env):
+    code, out = do_update(FakeRun())
+    assert code == 0
+    assert out.splitlines() == [
+        (
+            "⬆️  Updating demo 1.0.0 → v1.1.0 via `uv tool install --force --no-sources "
+            "git+https://github.com/owner/demo.git@v1.1.0` ..."
+        ),
+        "🎉 demo updated to v1.1.0!",
+    ]
+
+
 def test_update_current_defaults_to_installed_version(fake_env, monkeypatch):
     monkeypatch.setattr(uk.metadata, "version", lambda dist: "1.1.0")
     code, out = do_update(FakeRun(), current=None)
-    assert code == 0 and "already up to date" in out
+    assert code == 0 and "1.1.0 is already the latest version" in out
 
 
 def test_update_zh_tw_messages(fake_env):
     fake_env["latest"] = "v1.0.0"
     code, out = do_update(FakeRun(), lang="zh_TW")
     assert code == 0
-    assert "已是最新版本" in out
+    assert out.strip() == "✅ demo 1.0.0 已是最新版本（v1.0.0）。"
 
 
 def test_update_windows_spawns_detached_chain(fake_env, monkeypatch):
@@ -468,7 +551,7 @@ def test_parse_rejects_non_ascii_digits():
 
 def test_update_windows_refuses_cmd_metacharacters(fake_env, monkeypatch):
     spawned = []
-    monkeypatch.setattr(uk, "_spawn_detached", lambda cmdline, log: spawned.append(cmdline))
+    monkeypatch.setattr(uk, "_spawn_detached", lambda cmdline, log, env=None: spawned.append(cmdline))
     monkeypatch.setattr(uk, "_IS_WINDOWS", True)
     code, out = do_update(FakeRun(), url="https://example.invalid/r.git?a=1&calc")
     assert code == 1 and spawned == []
@@ -477,6 +560,7 @@ def test_update_windows_refuses_cmd_metacharacters(fake_env, monkeypatch):
 
 def test_update_manual_command_is_shell_quoted_on_posix(fake_env):
     fake_env["kind"] = ("unknown", None)
+    fake_env["on_path"] = set()
     _, out = do_update(FakeRun(), url="https://example.invalid/r.git?a=1&b=2")
     assert "'git+https://example.invalid/r.git?a=1&b=2@v1.1.0'" in out
 
