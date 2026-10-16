@@ -33,7 +33,7 @@ from typing import TextIO
 from urllib.parse import urlparse
 from urllib.request import url2pathname
 
-__version__ = "0.2.0"
+__version__ = "0.2.1"
 
 __all__ = [
     "UpdateError", "check", "hint", "install_kind", "latest_tag", "normalize_lang",
