@@ -1,3 +1,12 @@
+## [0.2.0] - 2026-10-16
+
+### 🚀 Features
+
+- **update:** [**breaking**] Always land on the newest release tag
+
+### ⚙️ Miscellaneous Tasks
+
+- Add Telegram failure notification
 ## [0.1.0] - 2026-10-15
 
 ### 🚀 Features
