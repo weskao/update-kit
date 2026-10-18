@@ -449,6 +449,14 @@ def test_check_refetches_after_ttl(tmp_path, tags):
     assert tags["calls"] == 1
 
 
+def test_check_default_ttl_sees_release_within_hours(tmp_path, tags):
+    cache = tmp_path / "state.json"  # a day-long default hid a release cut hours after the last check
+    cache.write_text(json.dumps({DEMO_URL: {"checked": time.time() - 2 * 3600, "latest": "v1.0.0"}}),
+                     encoding="utf-8")
+    assert uk.check(repo="owner/demo", current="1.0.0", cache_path=cache) == "v1.1.0"
+    assert tags["calls"] == 1
+
+
 def test_check_future_timestamp_cache_is_stale(tmp_path, tags):
     cache = tmp_path / "state.json"  # clock skew / tampering: a future `checked` must not pin the cache
     cache.write_text(json.dumps({DEMO_URL: {"checked": time.time() + 10_000, "latest": "v1.0.5"}}),

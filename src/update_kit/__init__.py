@@ -290,7 +290,7 @@ def update(*, app: str, repo: str, dist: str, current: str | None = None, lang: 
     return result
 
 
-def check(*, repo: str, current: str, cache_path: Path | None = None, ttl: int = 86400,
+def check(*, repo: str, current: str, cache_path: Path | None = None, ttl: int = 3600,
           timeout: float = 1.5, url: str | None = None) -> str | None:
     """Newer release tag than *current*, or None. Cached per source URL for *ttl*; never raises."""
     try:

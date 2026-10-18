@@ -52,7 +52,7 @@ def main(argv=None):
 | `latest_tag(repo, *, timeout=5, url=None) -> str` | Newest strict `v?X.Y.Z` tag (ASCII digits) via `git ls-remote --tags --refs`. Prereleases and other names are ignored. Raises `UpdateError` (offline, no tags, git missing). |
 | `install_kind(dist) -> (kind, detail)` | `"dev"` (PEP 610 local/editable dir, detail = the dir), `"uv"` / `"pipx"` (from `sys.prefix`), else `"unknown"`. |
 | `update(*, app, repo, dist, current=None, lang="en", after=(), out=sys.stderr, run=subprocess.run, url=None) -> int` | Always lands on the newest tag: a dev checkout, a branch/commit install, a newer build or an unmanaged install is replaced by it (via `uv`, else `pipx`). Exit code: **0** updated, or already installed from that tag (the message names the version) · **1** couldn't check (offline/rate limit) or install/after-step failed · **2** no `uv`/`pipx` found (manual command printed). |
-| `check(*, repo, current, cache_path=None, ttl=86400, timeout=1.5, url=None) -> str \| None` | Newer tag or `None`. Never raises. Results — failures too — are cached for `ttl` in `$HOME/.update-kit/state.json`, keyed by the resolved source URL. |
+| `check(*, repo, current, cache_path=None, ttl=3600, timeout=1.5, url=None) -> str \| None` | Newer tag or `None`. Never raises. Results — failures too — are cached for `ttl` in `$HOME/.update-kit/state.json`, keyed by the resolved source URL. |
 | `hint(cmd, latest, current, lang="en") -> str` | `my-cli v1.2.0 is available (you have 1.1.0) — run` `` `my-cli update` `` |
 | `should_hint(stream=sys.stderr) -> bool` | `True` only when `stream` is a TTY. |
 | `normalize_lang(value) -> str` | `zh_TW` / `zh-tw` / `zh-Hant` / `zh_HK` → `"zh-TW"`; anything else → `"en"`. |
