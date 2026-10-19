@@ -1,3 +1,9 @@
+## [0.2.2] - 2026-10-19
+
+### 🐛 Bug Fixes
+
+- **check:** Cache the latest tag for 1 hour, not 24
+- **check:** Cache the latest tag for 10 min, not 1 hour
 ## [0.2.1] - 2026-10-16
 
 ### 🧪 Testing
