@@ -2,24 +2,22 @@
 
 ## Frozen public API
 
-`update_kit`'s public functions (`latest_tag`, `install_kind`, `update`, `check`, `hint`,
-`should_hint`, `normalize_lang`, `UpdateError`) are consumed by aicp, ai-accounts,
+Every non-underscore name in `update_kit` (`latest_tag`, `install_kind`, `update`, `check`,
+`hint`, `should_hint`, `normalize_lang`, `UpdateError`) is consumed by aicp, ai-accounts,
 codex-reset-watch and agent-toggle. Signatures, defaults, return codes and the
-`$HOME/.update-kit/state.json` layout are a contract: changing any of them is a breaking
-change (`type(scope)!:` + `BREAKING CHANGE:` footer, minor bump while 0.x).
+`$HOME/.update-kit/state.json` layout are a contract: changing any is a breaking change (minor
+bump while 0.x).
 
 ## Rules
 
-- Stdlib only. No runtime dependencies, no `packaging`.
+- Stdlib only: no runtime dependencies, no `packaging`.
 - Every user-visible string exists in `en` and `zh-TW` in `_MESSAGES`.
-- Never prompt; never hit the network in tests (use a `file://` repo in `tmp_path` or a fake `run`).
-- Keep `README.md` and `CHANGELOG.md` in sync with user-visible changes.
+- Never prompt; tests never hit the network (`file://` repo in `tmp_path` or a fake `run`).
+- `CHANGELOG.md` records every user-visible change.
 
 ## Commands
 
-- Test: `uv run pytest`
-- Lint: `uv run ruff check .`
-- Build: `uv build`
+Test `uv run pytest` · Lint `uv run ruff check .` · Build `uv build`
 
 ## Cross-platform
 
